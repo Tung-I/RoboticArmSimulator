@@ -34,7 +34,7 @@ OUTPUT_DIR = cwd + '/output'
 CLASS_NAME = ['airplane', 'car', 'chair', 'guitar', 'mug']
 NAME2IDX = {'airplane': 1, 'car': 2, 'chair': 3, 'guitar': 4, 'mug': 5}
 
-USE_GUI = False
+USE_GUI = True
 
 class tm700_rgbd_gym(tm700_possensor_gym):
     def __init__(self,
