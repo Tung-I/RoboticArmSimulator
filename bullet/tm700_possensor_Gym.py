@@ -15,6 +15,7 @@ import random
 import pybullet_data
 from pkg_resources import parse_version
 import tm700
+from scipy.spatial.transform import Rotation as sciRotation
 largeValObservation = 100
 
 RENDER_HEIGHT = 720
@@ -32,8 +33,9 @@ class tm700_possensor_gym(gym.Env):
                isEnableSelfCollision=True,
                renders=False,
                isDiscrete=False,
+               width=64,
+               height=64,
                maxSteps=maxSteps):
-    #print("KukaGymEnv __init__")
     self._isDiscrete = isDiscrete
     self._timeStep = 1. / 240.
     self._urdfRoot = urdfRoot
@@ -47,6 +49,8 @@ class tm700_possensor_gym(gym.Env):
     self._cam_dist = 1.3
     self._cam_yaw = 180
     self._cam_pitch = -40
+    self._height = width
+    self._width = height
 
     self._p = p
     if self._renders:
@@ -56,12 +60,9 @@ class tm700_possensor_gym(gym.Env):
       p.resetDebugVisualizerCamera(1.3, 180, -41, [0.52, -0.2, -0.33])
     else:
       p.connect(p.DIRECT)
-    #timinglog = p.startStateLogging(p.STATE_LOGGING_PROFILE_TIMINGS, "tm700Timings.json")
     self.seed()
     self.reset()
     observationDim = len(self.getExtendedObservation())
-    #print("observationDim")
-    #print(observationDim)
 
     observation_high = np.array([largeValObservation] * observationDim)
     if (self._isDiscrete):
@@ -70,13 +71,27 @@ class tm700_possensor_gym(gym.Env):
       action_dim = 3
       self._action_bound = 1
       action_high = np.array([self._action_bound] * action_dim)
-      # print(action_high)
       self.action_space = spaces.Box(-action_high, action_high)
     self.observation_space = spaces.Box(-observation_high, observation_high)
     self.viewer = None
 
   def reset(self):
-    #print("KukaGymEnv _reset")
+
+    look = [0.4, 0.1, 0.54]
+    distance = 1.3
+    pitch = -41
+    yaw = -41
+    roll = 180
+    pos_range = [0.45, 0.5, 0.0, 0.1]
+    self._view_matrix = p.computeViewMatrixFromYawPitchRoll(look, distance, yaw, pitch, roll, 2)
+    self.fov = 60.
+    self.focal_length_x = self._width  * 0.5 / np.tan(np.radians(self.fov) * 0.5)
+    self.focal_length_y = self._height * 0.5 / np.tan(np.radians(self.fov) * 0.5)
+    aspect = self._width / self._height
+    self.d_near = 0.01
+    self.d_far  = 100
+    self._proj_matrix = p.computeProjectionMatrixFOV(self.fov, aspect, self.d_near, self.d_far)
+
     self.terminated = 0
     p.resetSimulation()
     p.setPhysicsEngineParameter(numSolverIterations=150)
@@ -106,6 +121,35 @@ class tm700_possensor_gym(gym.Env):
   def seed(self, seed=None):
     self.np_random, seed = seeding.np_random(seed)
     return [seed]
+
+  def get_xyz(self, z_buffer, proj_matrix, view_matrix):
+      inv_trans = np.linalg.pinv(np.matmul(proj_matrix, view_matrix)) # (4, 4)
+      x =  (2 * np.arange(0, z_buffer.shape[1]) - z_buffer.shape[1]) / z_buffer.shape[1]
+      y = -(2 * np.arange(0, z_buffer.shape[0]) - z_buffer.shape[0]) / z_buffer.shape[0]
+      xv, yv = np.meshgrid(x, y)
+      zv = 2 * z_buffer - 1
+      xyzw = np.stack((xv,yv,zv,np.ones_like(zv)), axis=0) # (4, H, W)
+      xyzw = np.dot(inv_trans, xyzw.reshape(4,-1)) # (4, H*W)
+      xyz  = (xyzw[:3] / xyzw[3]).reshape(3, z_buffer.shape[0], z_buffer.shape[1]) # (3, H, W)
+      return np.transpose(xyz, (1,2,0))
+
+  def getTargetGraspObservation(self, return_camera=True, **kwargs):
+    if return_camera:
+        img_arr = p.getCameraImage(width=self._width,
+            height=self._height,
+            viewMatrix=self._view_matrix,
+            projectionMatrix=self._proj_matrix)
+        z_buffer = img_arr[3]
+        z_buffer = np.reshape(z_buffer, (self._height, self._width))
+        segmentation = img_arr[4]
+        segmentation = np.reshape(segmentation, (self._height, self._width))
+        view_matrix = np.asarray(self._view_matrix).reshape((4,4), order='F')
+        proj_matrix = np.asarray(self._proj_matrix).reshape((4,4), order='F')
+        point_cloud = self.get_xyz(z_buffer, proj_matrix, view_matrix)
+        ##############################
+        np_im_arr = img_arr[2][:, :, :3].astype(np.float64)
+        ##############################
+        return point_cloud, segmentation, np_im_arr
 
   def getExtendedObservation(self):
     self._observation = self._tm700.getObservation()
@@ -150,7 +194,6 @@ class tm700_possensor_gym(gym.Env):
       f = 0.15
       realAction = [dx, dy, -0.0005, da, f]
     else:
-      # print("action[0]=", str(action[0]))
       dv = Dv
       dx = action[0] * dv
       dy = action[1] * dv
@@ -158,6 +201,34 @@ class tm700_possensor_gym(gym.Env):
       f = 0.15
       realAction = [dx, dy, -0.0005, da, f]
     return self.step2(realAction)
+
+  def step_to_target_pose(self, action, max_iteration=5000, min_iteration=100, trans_eps=0.005, rot_eps=0.2, ts=None):
+    success = False
+    for ite in range(max_iteration):
+      reward, done, state, info = self.step3(action)
+      if done:
+        break
+      target_t = np.asarray(state[0])
+      target_r = sciRotation.from_quat(np.asarray(state[1])).as_matrix()
+      trans_d  = np.linalg.norm(target_t-action[0][:3,3], ord=2)
+      rot_d    = np.degrees(np.arcsin(np.linalg.norm(np.eye(3) - np.dot(action[0][:3,:3], target_r.T), ord=None) / (2*np.sqrt(2))))
+      if trans_d<trans_eps and rot_d<rot_eps and ite>=min_iteration:
+        success = True
+        break
+      if not ts is None and ts>0:
+          time.sleep(ts)
+    info['planning'] = success
+    return reward, done, state, info
+
+  def step3(self, action):
+    state = self._tm700.applyActionIK(action)
+    p.stepSimulation()
+    self._envStepCounter += 1
+    if self._renders:
+      time.sleep(self._timeStep)
+    done = self._termination()
+    reward = self._reward()
+    return reward, done, state, {}
 
   def step2(self, action):
     for i in range(self._actionRepeat):
@@ -170,19 +241,12 @@ class tm700_possensor_gym(gym.Env):
       time.sleep(self._timeStep)
     self._observation = self.getExtendedObservation()
 
-    #print("self._envStepCounter")
-    #print(self._envStepCounter)
-
     done = self._termination()
     npaction = np.array([
         action[3]
     ])  #only penalize rotation until learning works well [action[0],action[1],action[3]])
     actionCost = np.linalg.norm(npaction) * 10.
-    #print("actionCost")
-    #print(actionCost)
     reward = self._reward() - actionCost
-    #print("reward")
-    #print(reward)
 
     #print("len=%r" % len(self._observation))
 
@@ -217,12 +281,9 @@ class tm700_possensor_gym(gym.Env):
     return rgb_array
 
   def _termination(self):
-    #print (self._tm700.endEffectorPos[2])
     state = p.getLinkState(self._tm700.tm700Uid, self._tm700.tmEndEffectorIndex)
     actualEndEffectorPos = state[0]
 
-    #print("self._envStepCounter")
-    #print(self._envStepCounter)
     if (self.terminated or self._envStepCounter > self._maxSteps):
       self._observation = self.getExtendedObservation()
       return True
@@ -232,7 +293,6 @@ class tm700_possensor_gym(gym.Env):
     if (len(closestPoints)):  #(actualEndEffectorPos[2] <= -0.43):
       self.terminated = 1
 
-      #print("terminating, closing gripper, attempting grasp")
       #start grasp and terminate
       fingerAngle = 0.15
       for i in range(1000):
@@ -249,8 +309,6 @@ class tm700_possensor_gym(gym.Env):
         p.stepSimulation()
         blockPos, blockOrn = p.getBasePositionAndOrientation(self.blockUid)
         if (blockPos[2] > 0.23):
-          #print("BLOCKPOS!")
-          #print(blockPos[2])
           break
         state = p.getLinkState(self._tm700.tm700Uid, self._tm700.tmEndEffectorIndex)
         actualEndEffectorPos = state[0]
@@ -289,7 +347,6 @@ class tm700_possensor_gym(gym.Env):
       # reward = 1/closestPoints1[0][8]+1/closestPoints2[0][8]
     if (blockPos[2] > 0.2):
       reward = reward + 1000
-      print("successfully grasped a block!!!")
       #print("self._envStepCounter")
       #print(self._envStepCounter)
       #print("self._envStepCounter")
@@ -309,14 +366,11 @@ class tm700_possensor_gym(gym.Env):
 
 if __name__ == '__main__':
 
-# datapath = pybullet_data.getDataPath()
   p.connect(p.GUI, options="--opencl2")
-  #p.setAdditionalSearchPath(datapath)
-  test =tm700_possensor_gym()
-  for i in range(10000):
-    # test.step2([0.55, 0.2, 0.05,0,0])
-    p.stepSimulation()
-    # tm700test.print_joint_state()
-    time.sleep(1. / 240.0)
+  test = tm700_possensor_gym()
+  test.reset()
+  p.stepSimulation()
+  while True:
+      test.step_to_target_pose([0.4317596244807792, 0.1470447615125933, 0.30, 0, -np.pi, 0, 0], ts=1/240.)
+      test.step_to_target_pose([0.4317596244807792, 0.1470447615125933, 0.30, 0, -np.pi, 0, 0.6], ts=1/10.)
 
-  time.sleep(50)

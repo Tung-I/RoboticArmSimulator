@@ -144,8 +144,8 @@ class tm700_rgbd_gym(tm700_possensor_gym):
     p.stepSimulation()
 
     # Choose the objects in the bin.
-    # urdfList = self._get_random_object(self._numObjects, self._isTest)
-    urdfList = self._get_block()
+    urdfList = self._get_random_object(self._numObjects, self._isTest)
+    # urdfList = self._get_block()
     self._objectUids = self._randomly_place_objects(urdfList)
     self._observation = self._get_observation()
     return np.array(self._observation)
@@ -436,6 +436,9 @@ if __name__ == '__main__':
 
   p.connect(p.GUI)
   #p.setAdditionalSearchPath(datapath)
-  test =tm700_rgbd_gym()
-  test.step([0, 0, 0, 0, 0, -0.25, 0.25])
-  time.sleep(50)
+  test = tm700_rgbd_gym()
+  while True:
+      test.reset()
+      test.step_to_target_pose([0.4317596244807792, 0.1470447615125933, 0.2876258566462587, 0, -np.pi, 0, 0], ts=1/240.)
+      test.step_to_target_pose([0.4317596244807792, 0.1470447615125933, 0.2876258566462587, 0, -np.pi, 0, 0.4], ts=1/60.)
+      print("Done")

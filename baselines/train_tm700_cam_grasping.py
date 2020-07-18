@@ -8,6 +8,8 @@ os.sys.path.insert(0, parentdir)
 os.sys.path.insert(0, sisterdir)
 
 from bullet.tm700_rgbd_Gym import tm700_rgbd_gym
+from bullet.tm700_rgb_Gym import tm700_rgb_gym
+from bullet.tm700_possensor_Gym import tm700_possensor_gym
 import numpy as np
 
 # from stable_baselines import DQN, DDPG
@@ -45,6 +47,15 @@ n_steps = 0
 
 if ENVIRONMENT == 'rgbd':
   env = tm700_rgbd_gym(renders=RENDERS, isDiscrete=DISCRETE)
+  env = Monitor(env, os.path.join(log_dir, 'monitor.csv'), allow_early_resets=True)
+
+
+if ENVIRONMENT == 'rgb':
+  env = tm700_rgb_gym(renders=RENDERS, isDiscrete=DISCRETE)
+  env = Monitor(env, os.path.join(log_dir, 'monitor.csv'), allow_early_resets=True)
+
+if ENVIRONMENT == 'possensor':
+  env = tm700_possensor_gym(renders=RENDERS, isDiscrete=DISCRETE)
   env = Monitor(env, os.path.join(log_dir, 'monitor.csv'), allow_early_resets=True)
 
 if MODEL == 'DQN':
